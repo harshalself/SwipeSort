@@ -1,0 +1,59 @@
+{
+  "lens": "correctness",
+  "verdicts": [
+    {
+      "finding_id": "F1",
+      "verdict": "confirmed",
+      "evidence": "SwipeSessionModel.swift lines 97-109: `swipeUp(intoAlbumId:)` calls `library.moveAssets(...)` directly (line 99-103) and then unconditionally calls `queue.record(.moveToAlbum(...))` (line 104-108). Both execute on every swipe-up. Today `commitDecisions()` never re-executes moves (F2's early-exit guard), so no data-loss double-move occurs in the current build, but `movedToAlbumCount` (line 214-219) counts all enqueued `.moveToAlbum` entries including ones already executed, inflating the summary. The queue entry is also never cleaned by `removeCommitted()` (SwipeDecision.swift line 70-75). The structural hazard for future double-execution is real.",
+      "revised_severity": "high"
+    },
+    {
+      "finding_id": "F2",
+      "verdict": "confirmed",
+      "evidence": "SwipeSessionModel.swift lines 239-243: `guard !deleteIds.isEmpty else { phase = .finished; return .success(affectedCount: 0) }`. When only `.moveToAlbum` decisions exist (zero `.delete` entries), `pendingDeletions` is empty and the guard exits immediately, setting `phase = .finished` without processing any moves. Because moves fire immediately in `swipeUp`, no move data is lost today, but `phase` transitions to `.finished` even for a session containing zero deletions — triggering the `finishedSummary.task` auto-commit path in SwipeStackView.swift lines 231-240. The control-flow incorrectness is confirmed: a move-only session terminates the deck as if a commit occurred.",
+      "revised_severity": "high"
+    },
+    {
+      "finding_id": "F3",
+      "verdict": "plausible",
+      "evidence": "PhotoKitLibrary.swift line 18: class is `@unchecked Sendable` with mutable vars `fetchResult` (line 21), `fetchedAuth` (line 22), `activeFilter` (line 23), protected by no lock or actor. SwipeSessionModel.swift lines 303-311 use `async let` to fire four concurrent library calls (`currentThumbTask`, `currentKindTask`, `nextThumbTask`, `prevThumbTask`). Although `SwipeSessionModel` is `@MainActor`, `PhotoKitLibrary` is not; the `async let` structured concurrency can hop off the main actor to execute the library functions concurrently, meaning two calls to `ensureFetchResult()` (which reads and writes `fetchResult` and `fetchedAuth` at lines 449-465) can interleave. Additionally `refreshFetchResult()` (line 469-474) writes `fetchResult = nil` from a `NotificationCenter` callback (PhotoLibraryChangePublisher line 29-36, dispatched to main via `DispatchQueue.main.async`). A proof requires runtime observation, so verdict is plausible rather than confirmed, but the structural race is present in the code.",
+      "revised_severity": "high"
+    },
+    {
+      "finding_id": "F4",
+      "verdict": "confirmed",
+      "evidence": "SwipeSessionModel.swift lines 182-191: `var target = 0` is the initializer. The while loop at lines 184-190 walks backward looking for `id == popped.identifier`. If no match is found (asset deleted externally, stale identifier, filter change), the loop completes without executing `break`, so `target` remains `0`. Line 191 unconditionally assigns `currentIndex = target`, navigating the session to index 0 — the very first asset in the library — rather than aborting or using a best-effort fallback. There is no guard or `Optional` wrapping to detect the not-found case.",
+      "revised_severity": "high"
+    },
+    {
+      "finding_id": "F5",
+      "verdict": "plausible",
+      "evidence": "SwipeStackView.swift lines 605-628: each threshold branch dispatches `Task { await model.swipe(...); dragOffset = .zero }`. Both `SwipeSessionModel` and `SwipeStackView` are `@MainActor`, so all `@MainActor`-isolated code is serialised — `advance()` and `currentIndex` writes cannot interleave, which refutes the double-advance scenario. However, `dragOffset = .zero` executes after the `await` inside the Task, meaning a second gesture can start before the first Task resets `dragOffset`. The finding's 'double-advance' claim is refuted by `@MainActor` serialisation, but the mid-animation `dragOffset` clobber scenario (second gesture's animation overwritten by first Task's reset) is plausible without running the app.",
+      "revised_severity": "medium"
+    },
+    {
+      "finding_id": "F6",
+      "verdict": "confirmed",
+      "evidence": "SwipeSessionModel.swift lines 245-247: `phase = .committing` is set before the await, then `phase = .finished` is set unconditionally at line 247 — before the `deleteResult` switch at line 249. If `commitDeletions` returns `.cancelledByUser`, the queue is correctly preserved (line 249-251 only strips on `.success`), but `phase` is already `.finished`. In SwipeStackView.swift, `finishedSummary` renders at line 229 and its `.task` block (lines 230-241) checks `commitResult == nil` — after a cancel, `commitResult` is set to `.cancelledByUser`, so the auto-retry path does not re-trigger. However, `phase = .finished` means the deck (`.ready` state) is no longer shown; the user is stuck on the summary screen with pending deletions and no way to resume without dismissing the entire sheet.",
+      "revised_severity": "high"
+    },
+    {
+      "finding_id": "F7",
+      "verdict": "plausible",
+      "evidence": "SwipeSessionModel.swift lines 77-79: `swipeKeep()` is a thin alias that calls `swipeFavorite()`, which at lines 81-86 always calls `library.setFavorite(..., isFavorite: true)`. However, `swipe(_:using:)` at lines 146-163 maps gesture directions directly to `swipeDelete()`, `swipeFavorite()`, `swipeNext()`, and `swipePrev()` — there is no call to `swipeKeep()` in the current gesture-routing code. The drag hint labels in `hintForDirection` (line 343/350) explicitly say 'FAVORITE' for the down/left directions, so the UX intent is favouriting, not neutral keeping. The claim that users accidentally favourite everything they 'keep' is plausible if a caller ever invokes `swipeKeep()` expecting neutral keep semantics — the alias is misleading — but in the current code no gesture path calls `swipeKeep`, so the silent-favouriting impact is limited to direct API misuse.",
+      "revised_severity": "medium"
+    },
+    {
+      "finding_id": "F8",
+      "verdict": "confirmed",
+      "evidence": "SwipeDecision.swift lines 70-75: `removeCommitted()` uses `decisions.removeAll { if case .delete = d { return true }; return false }`. Only `.delete` decisions are stripped. `.moveToAlbum` entries are never removed. SwipeSessionModel.swift lines 214-219: `movedToAlbumCount` counts all `.moveToAlbum` entries in `queue.decisions` — after commit, the stale entries remain and the count reflects lifetime moves rather than current-batch moves. This is confirmed: stale `.moveToAlbum` entries accumulate indefinitely in the queue.",
+      "revised_severity": "high"
+    },
+    {
+      "finding_id": "F9",
+      "verdict": "confirmed",
+      "evidence": "PhotoKitLibrary.swift lines 26-28: `init(albumId:)` calls `PhotoLibraryChangePublisher.shared.register()` unconditionally. PhotoLibraryChangePublisher.swift lines 22-25: `register()` calls `PHPhotoLibrary.shared().register(self)` with no auth check. The docstring on `register()` at line 22 even says 'Call once after photo-library access is granted' — confirming this is a documented intent violation. Any `PhotoKitLibrary` instance created before authorization (e.g., at app startup before the user grants access) registers an observer prematurely. The impact of spurious callbacks reaching `ensureFetchResult()` without valid auth is real; the `authIsUsable` guard at line 448 prevents caching stale results, but the repeated re-fetch overhead on every library change fires when not authorized.",
+      "revised_severity": "high"
+    }
+  ]
+}

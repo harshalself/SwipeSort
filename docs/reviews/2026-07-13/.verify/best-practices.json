@@ -1,0 +1,23 @@
+{
+  "lens": "best-practices",
+  "verdicts": [
+    {
+      "finding_id": "F1",
+      "verdict": "plausible",
+      "evidence": "PhotoKitLibrary does have three unguarded `var` properties (`fetchResult`, `fetchedAuth`, `activeFilter`) and is not `let`-only, so the structural `@unchecked Sendable` risk is real. However, the specific active-race scenario described — that `async let` branches inside `loadCurrent` read `fetchResult` concurrently while `ensureFetchResult` rewrites it — is inaccurate. Inspecting `loadCurrent()` (SwipeSessionModel.swift:291), the four `async let` concurrent branches call only `library.thumbnail(for:targetSize:)` and `library.mediaKind(for:)`, neither of which accesses `fetchResult`; they fetch by `localIdentifier` via `PHAsset.fetchAssets(withLocalIdentifiers:)`. All callers of `ensureFetchResult()` (`assetCount`, `assetIdentifier`, `identifiers(in:)`) are invoked at sequential `await` points within `@MainActor`-isolated methods of `SwipeSessionModel`, and because `@MainActor` is serial, concurrent mutation of `fetchResult` does not occur through any currently wired call path. The `applyFilter` and `refreshFetchResult` mutations also happen at sequential points in the root `.task {}`. The concern is therefore a latent structural hazard — `@unchecked` suppresses Swift 6 diagnostics and a future concurrent callsite would silently race — but no active race exists in the current code.",
+      "revised_severity": "medium"
+    },
+    {
+      "finding_id": "F2",
+      "verdict": "plausible",
+      "evidence": "MockPhotoLibrary is not `let`-only: it mutates `currentAuth`, `albums`, `lastCommittedDeletions`, `favoriteState`, `startCachingCalls`, `stopCachingCalls`, and `appliedFilter` across its method bodies, making `@unchecked Sendable` a structural hazard. The specific race scenario described — `async let` branches in `SwipeSessionModel.loadCurrent` racing on `scriptedMediaKinds` or `albums` — is not accurate in the current code: `thumbnail()` creates a per-call solid-colour image using only `identifier.rawValue.hashValue` (no shared state mutation), and `mediaKind()` only reads `scriptedMediaKinds[id.rawValue]` (a read-only dictionary access). `startCachingCalls` and `stopCachingCalls` are mutated by `append` in `startCachingThumbnails`/`stopCachingThumbnails`, but these are synchronous methods not invoked from the concurrent `async let` section. Since `SwipeSessionModel` is `@MainActor` and its calls are sequential at suspension points, no active concurrent mutation is demonstrated. The risk is latent: any future concurrent test harness that calls these methods concurrently would race invisibly under Swift 6 strict concurrency.",
+      "revised_severity": "medium"
+    },
+    {
+      "finding_id": "F3",
+      "verdict": "confirmed",
+      "evidence": "SwipeCardView.swift contains no `.accessibilityLabel`, `.accessibilityAddTraits`, `.accessibilityValue`, or `.accessibilityActions` modifiers anywhere in its `body` or helper views. In SwipeStackView.swift:215, the card is decorated only with `.accessibilityIdentifier(\"SwipeCard\")` — no label, no actions. A VoiceOver user landing on the card would hear nothing meaningful about the photo's identity or how to act on it. The `dragHintOverlay` (SwipeStackView.swift:300–327) is a plain `@ViewBuilder` returning a `VStack` of `Image` and `Text` with no `.accessibilityHidden(true)` modifier, so it exposes those raw icon and label strings to VoiceOver rather than being suppressed. The finding's description of the deficiency and failure scenario is fully accurate.",
+      "revised_severity": "high"
+    }
+  ]
+}

@@ -1,0 +1,41 @@
+{
+  "lens": "performance",
+  "verdicts": [
+    {
+      "finding_id": "F1",
+      "verdict": "refuted",
+      "evidence": "The finding claims all four `async let` continuations resume on `@MainActor`, blocking the run loop. `SwipeSessionModel` is `@MainActor` (line 14), so `loadCurrent` runs on the main actor. However, `thumbnail(for:targetSize:)` is declared in `PhotoLibraryProviding` (PhotoLibraryProviding.swift:57) with no `@MainActor` annotation — it is a plain `async` function. In Swift, `async let` launches child tasks that inherit the actor only if the called function is itself `@MainActor`-isolated; because `thumbnail` is not `@MainActor`, its child task runs on the cooperative thread pool, not the main actor. The `await` on line 308 (`currentThumbnail = await currentThumbTask`) suspends the `@MainActor` function and yields the main actor while the PhotoKit work proceeds on background threads. The main actor is free to handle UI events during those awaits. The description of serial blocking is therefore incorrect — the four `async let` tasks run in parallel on cooperative threads, and the main actor is released at each `await`. The legitimate concern (iCloud latency causing visible delay before `currentThumbnail` is set) is real but is not a main-actor stall.",
+      "revised_severity": "low"
+    },
+    {
+      "finding_id": "F2",
+      "verdict": "confirmed",
+      "evidence": "RecentsView.swift lines 238–240 show `.onReceive(NotificationCenter.default.publisher(for: PhotoLibraryChangePublisher.didChangeNotification)) { _ in Task { await loadAssets() } }` with no debounce whatsoever. `loadAssets()` (lines 244–253) calls `library.refreshFetchResult()`, `library.applyFilter(filter)`, `library.assetCount()`, and `library.identifiers(in: 0..<limit)` — a full re-index — on every invocation. AlbumsView.swift lines 98–100 shows the identical unbounced pattern calling `loadAlbums()`. Both subscriptions are unconditional. The finding's description of the failure scenario is accurate.",
+      "revised_severity": "high"
+    },
+    {
+      "finding_id": "F3",
+      "verdict": "plausible",
+      "evidence": "WindowedThumbnailCache.swift lines 25–36 confirm `aheadOf: 5, behind: 2` defaults and the window computation `lower = max(0, currentIndex - behind)`, `upper = min(total, currentIndex + aheadOf + 1)`. This produces a window of up to 8 assets (indices `currentIndex-2` to `currentIndex+5` inclusive), as the finding states. `slide()` is `@MainActor` (class is `@MainActor`, line 14) and is called via `Task { await thumbnailCache?.slide(...) }` from `onChange(of: model.currentIndex)` (SwipeStackView.swift line 100), so rapid swipes do queue multiple `slide()` calls. Each call does at least one `resolveIdentifiers` await (line 56 or 40), which calls `library.identifiers(in:)`. The finding's window-size concern (8 is narrow for drag-jumps) and the per-slide Photos DB query cost are valid. However the claim about serialization on the main actor is slightly overstated — each `Task { await ... }` suspends at the `await`, so the main actor is not continuously held; it is more of a backlog of async work than a true block. The core performance concern remains real.",
+      "revised_severity": "high"
+    },
+    {
+      "finding_id": "F4",
+      "verdict": "confirmed",
+      "evidence": "RecentsView.swift lines 26–31 show `GridImageCache.store(_:for:)` computing cost as `Int(image.size.width * image.size.height) * 4`. `UIImage.size` is in points (logical units, not pixels). On a 3x device a 400x400-pixel image has `.size` of ~133x133 points, yielding `Int(133 * 133) * 4 = 70,756` bytes claimed vs. `400 * 400 * 4 = 640,000` bytes actual — a 9x understatement. The `totalCostLimit` of `80 * 1024 * 1024` (line 17) therefore has no practical effect on 3x devices. The `countLimit = 600` (line 16) becomes the effective eviction boundary, allowing up to `600 * 640 KB = 384 MB` of image data in the worst case. The finding is accurate.",
+      "revised_severity": "high"
+    },
+    {
+      "finding_id": "F5",
+      "verdict": "plausible",
+      "evidence": "SwipeStackView.swift lines 102–105 confirm that `VideoPlayerPool.shared.drain()` is called only in `onDisappear`. VideoPlayerPool.swift lines 67–73 show `drain()` pauses and nil-replaces all retained players. The finding's scenario about `FullResViewer` or `DeletionQueueView` sheets keeping `SwipeStackView` alive (not triggering `onDisappear`) while the user navigates away from the app is architecturally plausible. However, the specific claim that a user can navigate away without closing the sheet and leave caching running indefinitely depends on app navigation structure not fully visible in the read files. The pool slots are indeed bounded at 3 (VideoPlayerPool.swift line 28) limiting the absolute memory leak to 3 AVPlayers, which mitigates severity somewhat. The architectural gap (no drain path from model deinit or phase transition) is real.",
+      "revised_severity": "high"
+    },
+    {
+      "finding_id": "F6",
+      "verdict": "confirmed",
+      "evidence": "RecentsView.swift lines 244–254 show `loadAssets()` calling `library.refreshFetchResult()` (line 248) followed immediately by `library.applyFilter(filter)` (line 249) on every invocation. PhotoKitLibrary.swift line 473 shows `refreshFetchResult()` sets `fetchResult = nil` unconditionally. PhotoKitLibrary.swift lines 476–485 show `applyFilter` guards with `guard filter != activeFilter else { return }` — when the filter has not changed, `applyFilter` returns immediately after the guard without doing anything. So `refreshFetchResult` nil-s the cursor and `applyFilter` no-ops, meaning a nil cursor is left for the subsequent `assetCount()` call to re-fetch. AlbumGridView lines 317–320 show the same pattern (`s.refreshFetchResult()` then `s.applyFilter(filter)`). The double-invalidation on unchanged-filter invocations is confirmed.",
+      "revised_severity": "high"
+    }
+  ]
+}

@@ -1,0 +1,29 @@
+{
+  "lens": "architecture",
+  "verdicts": [
+    {
+      "finding_id": "F1",
+      "verdict": "confirmed",
+      "evidence": "AlbumPickerSheet.swift lines 151–199 contain exactly the three cited declarations: struct GridSelectionBottomBar (lines 151–180), struct GridCellFramePreferenceKey (lines 184–189), and func gridIndex (lines 192–199). Both RecentsView.swift (lines 119, 145, 200–206) and AlbumsView.swift (lines 179, 205, 260–266) consume all three from this file. The structural problem — shared grid primitives homed in an album-picker implementation file — is present as described.",
+      "revised_severity": "high"
+    },
+    {
+      "finding_id": "F2",
+      "verdict": "confirmed",
+      "evidence": "RecentsView.swift lines 56–66 and AlbumsView.swift lines 130–135 declare identical @State clusters (isSelecting, selectedIds, showingAlbumPicker, cellFrames, dragStartIndex, dragStartSelectionState, imageCache, columns, thumbnailPixelSize). The drag gesture bodies (RecentsView lines 141–165, AlbumsView lines 201–225) are character-for-character identical. The one-sided accessibilityIdentifier divergence cited in the finding is confirmed: RecentsView line 123 applies '.accessibilityIdentifier(\"ThumbnailCell-\\(index)\")' on each cell; AlbumsView has no per-cell accessibilityIdentifier. The only structural differences are the asset limit (500 vs 1000) and scoped library use.",
+      "revised_severity": "high"
+    },
+    {
+      "finding_id": "F3",
+      "verdict": "plausible",
+      "evidence": "PhotoLibraryProviding.swift contains 22 func declarations (lines 52–131), not exactly 20 as stated — the finding undercounts by 2 (scoped and refreshFetchResult bring it to 22). The structural monolith claim is accurate: authorization, read, thumbnail, mutations, caching, video/live, filter, and scoping are all in one protocol; read-only grid views declare the same full type as SwipeSessionModel. The method count is slightly understated but the architectural problem is real. Revised to plausible because the finding overstates precision (says \"20 methods\") while the actual count is 22.",
+      "revised_severity": "high"
+    },
+    {
+      "finding_id": "F4",
+      "verdict": "confirmed",
+      "evidence": "AppSettings.swift line 66–68 exposes dryRunMode as a var property on the user-facing AppSettings class. SettingsView.swift lines 51–60 renders it under a 'Safety' section header as a Toggle labeled 'Dry-run mode (Safe simulation)' — directly alongside appearance, gesture, video, and deletion-flow user prefs, with no developer-menu indirection. The locked design decision in docs/superpowers/plans/README.md line 27 specifies the control is 'runtime-toggleable via a hidden debug menu (long-press the swipe-screen title bar)' and line 32 explicitly calls it 'distinct from developer-only DryRunMode'. The implementation contradicts the locked decision exactly as described.",
+      "revised_severity": "high"
+    }
+  ]
+}

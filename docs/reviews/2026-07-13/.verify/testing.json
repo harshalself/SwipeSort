@@ -1,0 +1,41 @@
+{
+  "lens": "testing",
+  "verdicts": [
+    {
+      "finding_id": "F1",
+      "verdict": "confirmed",
+      "evidence": "MockPhotoLibrary.removeAssetsFromAlbum (line 127-129 of MockPhotoLibrary.swift) unconditionally returns .success(affectedCount: ids.count) with no scripting hook — unlike commitDeletions and moveAssets which have nextCommitResult/nextMoveResult slots. SwipeSessionModel.undo() line 173 calls removeAssetsFromAlbum and discards the result with '_ =', so a .failed return is silently ignored. AlbumMoveTests.swift contains no undo test for either the nil-fromAlbumId or non-nil-fromAlbumId path. Finding is fully substantiated.",
+      "revised_severity": "high"
+    },
+    {
+      "finding_id": "F2",
+      "verdict": "confirmed",
+      "evidence": "SwipeSessionModel.undo() line 192 sets phase = .ready unconditionally regardless of the prior phase. SessionResumeTests.undoRemovesDecision() only tests undo of a .delete decision before the session reaches .finished — it never swipes through all assets, never triggers .finished, and never calls undo() from .finished. SwipeSessionModelTests.undoRewinds() similarly starts from .ready. No test covers the .finished -> undo() -> .ready transition path or verifies currentThumbnail is non-nil after undo from .finished.",
+      "revised_severity": "high"
+    },
+    {
+      "finding_id": "F3",
+      "verdict": "plausible",
+      "evidence": "No concurrency test exists in SwipeSessionModelTests.swift. However, SwipeSessionModel is marked @MainActor, which serializes all async method calls on the main actor — two concurrent swipeDelete() calls dispatched via 'async let' on the same actor will execute sequentially, not interleave. This eliminates the specific double-increment race described in the finding. The real risk is UI-layer double-gesture dispatch before the first await returns at the view level, but within the model itself @MainActor provides the guard. The absence of a regression test for this boundary is still a gap, but the severity is lower than described since the architectural protection exists.",
+      "revised_severity": "medium"
+    },
+    {
+      "finding_id": "F4",
+      "verdict": "confirmed",
+      "evidence": "MockPhotoLibrary.refreshFetchResult() is a documented no-op (lines 169-171, comment: 'No-op in mock — fetch results are always fresh'). Grepping all SwipeSortTests/*.swift files reveals no test references to refreshFetchResult, PHPhotoLibraryChangeObserver, or PhotoLibraryChangePublisher. SwipeSessionModel has no mechanism to re-validate currentIndex after a fetch-result refresh. The integration path between the change observer and the session model is entirely untested.",
+      "revised_severity": "high"
+    },
+    {
+      "finding_id": "F5",
+      "verdict": "confirmed",
+      "evidence": "SwipeSessionModelTests.startDenied() tests denial at start, and startRequestsAuthorization() tests .notDetermined at start — both via MockPhotoLibrary.currentAuth set at init time. MockPhotoLibrary has no public method to mutate currentAuth after initialization (it is a private var, only updated by requestAuthorization()). SwipeSessionModel.start() is the only place authorization is checked; there is no mid-session auth check in swipeKeep/swipeDelete/advance. No test scripts auth revocation after phase == .ready.",
+      "revised_severity": "high"
+    },
+    {
+      "finding_id": "F6",
+      "verdict": "confirmed",
+      "evidence": "CommitDeletionsTests.swift contains commitSuccess (scripts default .success), commitCancelled (scripts .cancelledByUser), and emptyBatch — but no test scripts .failed(reason:). In SwipeSessionModel.commitDecisions() (lines 245-252), 'phase = .finished' is set on line 247 before the success-guard on line 249 that conditionally calls queue.removeCommitted(). This means that on a .failed result, phase is set to .finished but the queue is not cleared — a correctness bug this test would expose, as the finding states. The .failed path through commitDecisions() is entirely unexercised.",
+      "revised_severity": "high"
+    }
+  ]
+}

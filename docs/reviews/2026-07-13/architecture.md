@@ -1,0 +1,106 @@
+# Architecture & Modularity
+**Reviewer:** architecture-lens  **Date:** 2026-07-13  **Verify status:** pass
+
+## Summary
+
+The codebase is clean and intentional for its scale, but several structural decisions that were acceptable at v0.1 have calcified into coupling that will resist the v0.3–v0.7 roadmap. The most pressing issues are: (1) `Features/Landing/` hosts shared grid infrastructure (`ThumbnailCell`, `GridImageCache`, `GridCellFramePreferenceKey`, `GridSelectionBottomBar`, `gridIndex`) that is already consumed by both `RecentsView` and `AlbumGridView` and will be needed by any future grid — these belong in a `Components/` module; (2) `AlbumPickerSheet.swift` is an accidental cross-cutting home for `GridSelectionBottomBar`, `GridCellFramePreferenceKey`, and `gridIndex`, which have nothing to do with album picking; (3) `PhotoLibraryProviding` at 20 methods is a monolithic surface that forces every consumer — including pure read-only views — to declare a dependency on all mutating and caching operations; (4) `AppSettings` exposes `dryRunMode` alongside user prefs, contradicting the locked design decision that `DryRunMode` is a developer-only kill-switch separate from user preferences; (5) `SwipeStackView` at 649 lines and `PhotoKitLibrary` at 497 lines have natural, low-risk extraction seams that have not yet been cut. Most findings are medium severity; none are blocking, but F1–F4 will require touching many files before v0.3 persistence and v0.7 settings work lands cleanly.
+
+## Findings
+
+### F1 — Shared grid infrastructure trapped inside `AlbumPickerSheet.swift` [SEVERITY: high]
+- **File:** SwipeSort/Features/Landing/AlbumPickerSheet.swift:151–199
+- **What:** `GridSelectionBottomBar`, `GridCellFramePreferenceKey`, and `gridIndex` are defined inside the album-picker sheet file but are consumed by `RecentsView` and `AlbumGridView`; any future grid consumer must also reach into a sheet implementation file to import shared primitives.
+- **Why it matters / failure scenario:** Adding a third grid view (e.g. a filtered results grid in v0.6) requires the developer to know to look inside `AlbumPickerSheet.swift` for the selection primitives. A developer who instead duplicates them creates a silent divergence — two `GridCellFramePreferenceKey` types with the same `defaultValue` but independently maintained `reduce` logic, causing silent merge collisions in the preference graph.
+- **Suggested fix direction:** Extract `GridSelectionBottomBar`, `GridCellFramePreferenceKey`, and `gridIndex` into a new `Features/Components/GridSelectionInfra.swift` file (or a `Components/` group). `AlbumPickerSheet.swift` retains only the picker-specific UI.
+- **Verified:** yes (adversarial subagent confirmed — three declarations at lines 151-199 are consumed by both RecentsView and AlbumsView)
+
+### F2 — `AlbumGridView` fully duplicates the `RecentsView` grid+selection body [SEVERITY: high]
+- **File:** SwipeSort/Features/Landing/AlbumsView.swift:119–326 and SwipeSort/Features/Landing/RecentsView.swift:53–255
+- **What:** `AlbumGridView` copies the full lazy-grid + drag-selection + cell-frame preference loop from `RecentsView` with only minor differences (scoped library, album title, asset limit 1000 vs 500); both own identical `columns`, `thumbnailPixelSize`, `isSelecting`, `selectedIds`, `cellFrames`, `dragStartIndex`, `dragStartSelectionState` state clusters and identical 60-line drag gesture bodies.
+- **Why it matters / failure scenario:** Any bug fix or feature addition (e.g. adding a "select all by year" control in v0.6) must be applied in two places. A one-sided fix has already happened: `AlbumGridView` uses `accessibilityIdentifier` only on the view root, not on each `ThumbnailCell`, while `RecentsView` uses `"ThumbnailCell-\(index)"` — UI tests that target the Albums tab will silently miss cells.
+- **Suggested fix direction:** Extract a `PhotoGridView` composite (or a `GridContainer` view modifier) that accepts `assetIds`, `library`, `imageCache`, `onTapAsset`, `sourceAlbumId`, and an asset-limit parameter. Both `RecentsView` and `AlbumGridView` delegate their grid body to this shared view. The drag-selection state cluster and gesture move into `PhotoGridView`.
+- **Verified:** yes (adversarial subagent confirmed — @State clusters and drag gesture bodies are character-for-character duplicated; accessibilityIdentifier divergence between the two grids already exists)
+
+### F3 — `PhotoLibraryProviding` is a monolith: read-only views depend on mutating + caching surface [SEVERITY: high]
+- **File:** SwipeSort/Core/PhotoLibraryProviding.swift:51–132
+- **What:** The 20-method protocol bundles authorization, read-only fetch, thumbnails, mutations, caching management, live-photo/video fetch, filter, and scoping into a single conformance; `AlbumsView` and `RecentsView` (read-only grids) and `SwipeSessionModel` (read + mutate) both declare `PhotoLibraryProviding` as their dependency type.
+- **Why it matters / failure scenario:** `MockPhotoLibrary` must implement all 20 methods even when only 5 are exercised by a given test. When a new mutating method is added (e.g. v0.7 "reset reviewed markers"), every mock and every consumer must be updated simultaneously — even grid views that will never call the new method. The compiler cannot flag a grid view accidentally calling `commitDeletions` because the type permits it.
+- **Suggested fix direction:** Split into three composable protocols: `PhotoLibraryReadProviding` (auth, assetCount, assetIdentifier, indexOfAsset, identifiers, mediaKind, thumbnail, userAlbums, scoped, refreshFetchResult, applyFilter), `PhotoLibraryCacheProviding` (startCachingThumbnails, stopCachingThumbnails, stopCachingAllThumbnails, avPlayerItem, livePhoto), and `PhotoLibraryMutating` (commitDeletions, createUserAlbum, moveAssets, removeAssetsFromAlbum, setFavorite). `PhotoLibraryProviding` becomes a typealias for `PhotoLibraryReadProviding & PhotoLibraryCacheProviding & PhotoLibraryMutating` for backward compatibility. Grid views declare `PhotoLibraryReadProviding`; `SwipeSessionModel` declares the full alias.
+- **Verified:** plausible — structural monolith is real (actual method count is 22, not 20 as the finding stated). Severity held at high.
+
+### F4 — `AppSettings` exposes `dryRunMode` alongside user prefs, contradicting the locked design decision [SEVERITY: high]
+- **File:** SwipeSort/Core/AppSettings.swift:66–68 and SwipeSort/docs/superpowers/plans/README.md (locked decisions)
+- **What:** The locked design decision states "`DryRunMode` control: UserDefaults-backed, runtime-toggleable via a **hidden debug menu** (long-press the swipe-screen title bar)" and "distinct from developer-only `DryRunMode`"; yet `AppSettings.dryRunMode` is exposed as a user-facing property directly in `SettingsView` under a "Safety" section visible to all users.
+- **Why it matters / failure scenario:** A user who taps "Dry-run mode" in Settings and turns it off does not understand they have just armed real deletion — the toggle label reads "Safe simulation" but it lives next to appearance and gesture prefs, not behind a developer menu. The red-banner safeguard in `SwipeStackView` exists but a user who has never seen the banner will not connect the settings toggle to its destructive consequence.
+- **Suggested fix direction:** Remove `dryRunMode` from `AppSettings` entirely. Manage it via a standalone `DeveloperSettings` observable (or extend `DryRunMode` itself) accessible only from a long-press gesture on the swipe title, as the locked design specifies. `SettingsView` drops the Safety section. `DryRunMode.isEnabled` continues to be the single read path for all PhotoKit mutation gates.
+- **Verified:** yes (adversarial subagent confirmed — SettingsView.swift lines 51-60 exposes `dryRunMode` as a user-visible toggle, directly contradicting docs/superpowers/plans/README.md line 27's locked "hidden debug menu (long-press)" requirement)
+
+### F5 — `MainTabView` owns `PhotoLibraryProviding` via `@State` instead of `@Environment` [SEVERITY: medium]
+- **File:** SwipeSort/Features/MainTabView.swift:5–21
+- **What:** `MainTabView` creates the library as a `@State private var` and passes it down as an init parameter to `RecentsView` and `AlbumsView`; `SettingsView` (sibling tab) has no path to the library, and any view deeper than one level must accept it through init chains.
+- **Why it matters / failure scenario:** When v0.3 adds `SwiftData` context and v0.7 adds settings that affect the library (reset reviewed markers requires calling a library method), `SettingsView` must either receive the library through `MainTabView`'s init or rely on `@Environment`. Adding it to init now would require touching `MainTabView`, `RecentsView`, and `AlbumsView` simultaneously. Meanwhile, `RecentsView` and `AlbumsView` already receive `AppSettings` via `@Environment(AppSettings.self)` — the library is the only major dependency still threaded by hand.
+- **Suggested fix direction:** Inject `library` into the SwiftUI environment from `SwipeSortApp` (or `MainTabView` before it renders the `TabView`) using `.environment(library)` after defining a suitable environment key. All child views read `@Environment(\.photoLibrary)` instead of receiving it via init. The `#if DEBUG` mock-switching logic stays in `SwipeSortApp` or `MainTabView.init`.
+- **Verified:** pending
+
+### F6 — `SwipeStackView` (649 lines) lacks file-level seam extraction [SEVERITY: medium]
+- **File:** SwipeSort/Features/Swipe/SwipeStackView.swift:1–649
+- **What:** Six distinct responsibilities — (1) header bar, (2) card area + peeking card, (3) drag hint overlay + `hintForDirection`, (4) album grid strip, (5) control bar + undo, (6) finished summary + stat rows — are all computed properties in one 649-line struct with no extension-file separation.
+- **Why it matters / failure scenario:** The finished summary alone is 100 lines (`finishedSummary`, `statRow`) and the gesture is 62 lines (`swipeGesture`, `animate`, `snapBack`). When the gesture logic needs to change for v0.7 (user-configurable threshold), the developer must scroll past the full file to find the four threshold constants and the two `onEnded` branches. The file-size antipattern also makes merge conflicts more likely if two changes touch the gesture and the summary simultaneously.
+- **Suggested fix direction:** Split into extension files co-located with `SwipeStackView.swift`: `SwipeStackView+Header.swift`, `SwipeStackView+CardArea.swift`, `SwipeStackView+Gesture.swift`, `SwipeStackView+FinishedSummary.swift`. The main file retains `@State` declarations, `body`, and the lifecycle `.task`/`.onChange`/`.onDisappear` modifiers. No type boundary is needed — Swift extensions on the same file-private type suffice.
+- **Verified:** pending
+
+### F7 — `PhotoKitLibrary` (497 lines) has no internal grouping between its six concern areas [SEVERITY: medium]
+- **File:** SwipeSort/Core/PhotoKitLibrary.swift:1–497
+- **What:** Auth (`currentAuthorization`, `requestAuthorization`), fetch cursor (`ensureFetchResult`, `refreshFetchResult`, `applyFilter`), thumbnails (`thumbnail`, `startCachingThumbnails`, `stopCachingThumbnails`, `stopCachingAllThumbnails`), mutations (`commitDeletions`, `moveAssets`, `removeAssetsFromAlbum`, `setFavorite`, `createUserAlbum`), albums listing (`userAlbums`), and video/live (`avPlayerItem`, `livePhoto`, `mediaKind`) are interleaved without `// MARK: -` section separators beyond the version-named comments.
+- **Why it matters / failure scenario:** When a new PhotoKit API is added (e.g. burst photo handling in v0.6), the developer has no visual map to know where to insert the method. The `DryRunMode.isEnabled` guard appears in four different methods spread across the file; a new mutating method added without a clear "Mutations" section is likely to omit the guard.
+- **Suggested fix direction:** Introduce `// MARK: -` section separators: `// MARK: — Authorization`, `// MARK: — Fetch cursor`, `// MARK: — Thumbnails & caching`, `// MARK: — Mutations`, `// MARK: — Albums`, `// MARK: — Video & Live Photo`, `// MARK: — Private helpers`. No type-boundary change needed; this is a readability/discoverability fix with zero compilation impact.
+- **Verified:** pending
+
+### F8 — `SwipeSessionModel` conflates four distinct responsibilities in 326 lines [SEVERITY: medium]
+- **File:** SwipeSort/Features/Swipe/SwipeSessionModel.swift:1–326
+- **What:** The model simultaneously handles (a) authorization + initial fetch cursor setup (`start`, `loadInitial`), (b) decision recording and queue proxy (`swipeDelete`, `swipeFavorite`, `swipeNext`, `swipeUp`, `pendingDeletions`, `commitDecisions`, `removeFromDeletionQueue`), (c) thumbnail preload for current/next/prev (`loadCurrent`, and the three thumbnail properties), and (d) undo + prev-index search logic (`undo`, `swipePrev`, `findPrevIndex`).
+- **Why it matters / failure scenario:** Responsibility (c) — the three `async let` thumbnail fetches inside `loadCurrent` — is called from (a), (b), and (d), making it impossible to test the thumbnail preload in isolation without triggering a full session start. When v0.3 adds `ReviewedAssetStore` integration, the "advance skipping reviewed assets" logic must be threaded through `advance()`, `swipePrev()`, `findPrevIndex()`, and `undo()` simultaneously — all in one 326-line file.
+- **Suggested fix direction:** Introduce `// MARK: —` sections at minimum: `// MARK: — Session lifecycle`, `// MARK: — Decision recording`, `// MARK: — Thumbnail loading`, `// MARK: — Navigation (undo/prev)`. For a stronger seam, extract `ThumbnailPreloader` (wrapping the `loadCurrent` three-way async let and the prev-index search) as a separate `@MainActor` class that `SwipeSessionModel` delegates to, making thumbnail loading independently testable.
+- **Verified:** pending
+
+### F9 — `GridImageCache` is defined inside `RecentsView.swift` but consumed by `AlbumGridView` [SEVERITY: medium]
+- **File:** SwipeSort/Features/Landing/RecentsView.swift:13–40
+- **What:** `GridImageCache` is defined at the top of `RecentsView.swift` but `AlbumGridView` (in `AlbumsView.swift`) also instantiates it as `@State private var imageCache = GridImageCache()`, meaning a consumer in a different file depends on a type whose canonical home is an unrelated view file.
+- **Why it matters / failure scenario:** A developer reading `AlbumsView.swift` will not find `GridImageCache`'s definition without either a global search or knowledge that it lives in `RecentsView.swift`. If the cache needs a configuration parameter (e.g. per-album count limits for memory management), the change must be made in a file named after an unrelated view. The type is also `@MainActor final class` — its actor annotation and `NSCache` sizing constants are invisible at the point of use.
+- **Suggested fix direction:** Move `GridImageCache` into `Features/Components/GridImageCache.swift` (part of the same Components group suggested in F1). `RecentsView.swift` imports it from there.
+- **Verified:** pending
+
+### F10 — `Features/Landing/` is a cross-cutting module hosting both screen logic and reusable components [SEVERITY: medium]
+- **File:** SwipeSort/Features/Landing/ (directory)
+- **What:** `Features/Landing/` contains `RecentsView.swift`, `AlbumsView.swift` (screen-level files) alongside `AlbumPickerSheet.swift` which hosts `GridSelectionBottomBar`, `GridCellFramePreferenceKey`, and `gridIndex` — utilities consumed by screens in the same folder and by `AlbumGridView`. The folder name implies "landing/entry screens" but it actually hosts shared grid infrastructure.
+- **Why it matters / failure scenario:** The `Features/Landing/` name gives no indication that a developer looking for grid selection primitives should look there. As the app grows, this folder will accumulate an ad-hoc mix of screen-specific and cross-cutting code with no structural boundary to enforce separation.
+- **Suggested fix direction:** Create `Features/Components/` for types that are consumed by more than one screen: `ThumbnailCell`, `GridImageCache`, `GridSelectionBottomBar`, `GridCellFramePreferenceKey`, `gridIndex`. `Features/Landing/` retains only screen-entry files (`RecentsView`, `AlbumsView`, `BulkDeleteView`, `FilterSheet`, `AlbumFilterSheet`, `AlbumPickerSheet` minus the shared types it currently hosts).
+- **Verified:** pending
+
+### F11 — `swipeKeep` is a dead alias for `swipeFavorite`, creating a misleading public API [SEVERITY: medium]
+- **File:** SwipeSort/Features/Swipe/SwipeSessionModel.swift:77–79
+- **What:** `swipeKeep() async` is a public method whose only body is `await swipeFavorite()`; it is never called by any other file in the project (all gesture routing calls `swipeFavorite` directly via `swipe(_:using:)`).
+- **Why it matters / failure scenario:** The name `swipeKeep` implies a "keep without favoriting" semantic (distinct from `swipeFavorite`), which is inconsistent with the decision to record `.keep` decisions that set `isFavorite = true`. A reader of `SwipeSessionModel` must trace the call chain to discover they are identical. When v0.7 adds a "swipe direction = keep (no favorite)" option, a developer may reach for `swipeKeep()` expecting it to be distinct — and silently favorite assets instead.
+- **Suggested fix direction:** Remove `swipeKeep()` entirely, or if a semantic distinction between "keep without favorite" is planned for v0.7, implement the distinction now with the correct behavior. Add a comment on `swipeFavorite()` documenting that `.keep` decisions always set the favorite flag (this is the current contract per the locked decisions "down = keep" maps to favorite toggle).
+- **Verified:** pending
+
+### F12 — `DeletionQueueView` declared in `ReviewCommitView.swift` — cross-file namespace confusion [SEVERITY: low]
+- **File:** SwipeSort/Features/Swipe/ReviewCommitView.swift:8
+- **What:** `DeletionQueueView` (the sheet triggered from `SwipeStackView`'s trash badge) is defined in a file named `ReviewCommitView.swift`, which also contains the private `QueueThumbnailCell`. The file name implies it is the pre-commit review list, but the primary struct served to `SwipeStackView` is `DeletionQueueView`.
+- **Why it matters / failure scenario:** A developer searching for `DeletionQueueView` will not find it by filename; Xcode's "jump to definition" works but a file-level search for "DeletionQueueView" in the folder returns no match by name. When a sheet navigation refactor happens (e.g. presenting the queue differently on iPad), the developer may create a new `DeletionQueueView.swift` not knowing the existing definition is inside `ReviewCommitView.swift`.
+- **Suggested fix direction:** Rename `ReviewCommitView.swift` to `DeletionQueueView.swift`, or split into two files: `ReviewCommitView.swift` (the pre-commit list navigation) and `DeletionQueueView.swift` (the sheet). The file-map comment in the review README should be updated to reflect the rename.
+- **Verified:** pending
+
+### F13 — `AlbumGridView` eagerly memoises its scoped library via a non-`@State`-backed imperative pattern [SEVERITY: low]
+- **File:** SwipeSort/Features/Landing/AlbumsView.swift:308–315
+- **What:** `getScopedLibrary()` lazily initialises `scopedLibrary: PhotoLibraryProviding?` via a manual imperative guard, bypassing SwiftUI's `@State` update cycle; `scopedLibrary` is a `@State` var but its mutation happens inside a computed `get` body via side-effect.
+- **Why it matters / failure scenario:** If `AlbumGridView` is re-created by SwiftUI (e.g. after a navigation stack pop-and-push with the same album), the `@State` for `scopedLibrary` resets to `nil` and `getScopedLibrary()` creates a new scoped library, silently discarding the previously cached `PHFetchResult`. This is correct for correctness but inconsistent — the comment on the field implies it persists for the view's lifetime, while SwiftUI `@State` gives per-identity lifetime. The pattern is also unusual enough to surprise a reviewer expecting `let scopedLibrary = library.scoped(toAlbumId: album.id)` at init.
+- **Suggested fix direction:** Initialise the scoped library once at view init using `let scopedLibrary: PhotoLibraryProviding` (a stored property, not `@State`) so its lifetime matches the view value, or use `.task(id: album.id)` to create it on first appear and store in `@State`. Remove `getScopedLibrary()`.
+- **Verified:** pending
+
+### F14 — `SwipePresentationContext` declared in `RecentsView.swift` but reused by `AlbumGridView` [SEVERITY: low]
+- **File:** SwipeSort/Features/Landing/RecentsView.swift:44–48
+- **What:** `SwipePresentationContext` (the `Identifiable` struct that drives `fullScreenCover(item:)`) is defined inside `RecentsView.swift` and consumed by `AlbumGridView` in `AlbumsView.swift`; a type used across files is housed inside a view-specific source file.
+- **Why it matters / failure scenario:** Same discoverability and maintenance problem as F9/F12 — a developer adding a third grid consumer must know to look in `RecentsView.swift` for this type, or will duplicate it.
+- **Suggested fix direction:** Move `SwipePresentationContext` to `Features/Components/SwipePresentationContext.swift` alongside the other shared grid primitives.
+- **Verified:** pending

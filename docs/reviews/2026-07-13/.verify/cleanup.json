@@ -1,0 +1,23 @@
+{
+  "lens": "cleanup",
+  "verdicts": [
+    {
+      "finding_id": "F1",
+      "verdict": "plausible",
+      "evidence": "SwipeSessionModel.swift:77-79 confirms `swipeKeep()` exists and its entire body is `await swipeFavorite()`. Grep of the whole codebase shows `swipeKeep` is called at SwipeSortTests/SwipeSessionModelTests.swift:56, 81, 82, 152; SwipeSortTests/AlbumMoveTests.swift:96; SwipeSortTests/CommitDeletionsTests.swift:18, 57 — exclusively from test files. No production call site (no View, no gesture handler) invokes `swipeKeep`; gesture dispatch in `swipe(_:using:)` at SwipeSessionModel.swift:146-163 calls `swipeFavorite()` directly. The finding that `swipeKeep` is a test-only alias for `swipeFavorite` is accurate. Verdict is 'plausible' rather than 'confirmed' because the alias is technically callable public API and its removal is a judgment call, but the factual claim — no production caller, only test callers — is substantiated.",
+      "revised_severity": "high"
+    },
+    {
+      "finding_id": "F2",
+      "verdict": "confirmed",
+      "evidence": "AppSettings.swift:11-14 shows the GestureMode enum doc-comments read 'Down = Keep' (case upDeleteDownKeep) and 'Left = Keep' (case rightDeleteLeftKeep). SettingsView.swift:85-86 shows `displayName` returns 'Mode 1 (Up: Delete, Down: Fav)' and 'Mode 2 (Right: Delete, Left: Fav)' — using 'Fav', not 'Keep'. The actual swipe dispatch at SwipeSessionModel.swift:151 and 157 calls `swipeFavorite()` for those directions. The enum doc-comments say 'Keep' while user-facing strings and runtime behavior say 'Fav'; the mismatch is present at the exact lines cited.",
+      "revised_severity": "high"
+    },
+    {
+      "finding_id": "F3",
+      "verdict": "confirmed",
+      "evidence": "SwipeFilter.swift:18 declares the `livePhotosOnly` case. The setter at lines 66-67 groups `.any` and `.livePhotosOnly` together in a single `case .any, .livePhotosOnly: break` — meaning setting `.livePhotosOnly` performs no insertion into `selectedMediaTypes`, identical to `.any`. The getter at lines 50-59 has no branch for `.livePhotosOnly` (it only maps `.photos`, `.videos`, `.screenshots`), so the getter can never return `.livePhotosOnly`. The `nsPredicate()` method at lines 81-118 builds predicates from `selectedMediaTypes` membership (.photos, .videos, .screenshots) but has no live-photos branch; since the setter never inserts anything for `.livePhotosOnly`, no predicate is ever generated for it. Grep confirms `livePhotosOnly` only appears at SwipeFilter.swift:18 (definition) and :67 (the silent no-op setter branch) — no other file sets or reads this case. The case is entirely unreachable in effect: selecting it silently returns all assets.",
+      "revised_severity": "high"
+    }
+  ]
+}
